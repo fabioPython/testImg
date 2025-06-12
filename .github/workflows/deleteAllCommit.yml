@@ -1,0 +1,95 @@
+# .github/workflows/squash-history.yml
+
+name: Squash All History to Single Commit
+
+on:
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+    inputs:
+      branch_to_squash:
+        description: 'Branch to squash (e.g., main, master). WARNING: This is DESTRUCTIVE!'
+        required: true
+        default: 'main'
+      commit_message:
+        description: 'Commit message for the new single commit'
+        required: true
+        default: 'feat: Initial commit (squashed history)'
+      confirmation:
+        description: 'Type "yes-i-am-sure" to confirm this destructive operation.'
+        required: true
+
+jobs:
+  squash_repository_history:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirmation == 'yes-i-am-sure' # Safety check
+
+    # Grant write permissions to the GITHUB_TOKEN for pushing
+    permissions:
+      contents: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@63c24ba6bd7ba022e95695ff85de572c04a18142 # v2.7.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout the target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch_to_squash }}
+          # fetch-depth: 1 # We only need the latest state for this operation
+
+      - name: Configure Git User
+        run: |
+          git config user.name "GitHub Action Bot"
+          git config user.email "actions-bot@github.com"
+
+      - name: Perform the Squash Operation
+        env:
+          TARGET_BRANCH: ${{ github.event.inputs.branch_to_squash }}
+          NEW_COMMIT_MESSAGE: ${{ github.event.inputs.commit_message }}
+        run: |
+          set -e # Exit immediately if a command exits with a non-zero status
+
+          echo "🛑 WARNING: About to squash all history on branch '$TARGET_BRANCH'"
+          echo "This will replace all existing commits with a single new commit."
+          echo "Current HEAD is $(git rev-parse HEAD)"
+
+          # 1. Create a new orphan branch. This branch has no parent and no history.
+          #    It will start with the current working directory's content.
+          git checkout --orphan new_history_branch
+
+          # 2. Stage all files from the current working directory (which reflects the last commit).
+          git add -A
+
+          # 3. Create the new single commit.
+          git commit -m "$NEW_COMMIT_MESSAGE"
+
+          # 4. Delete the old local target branch.
+          #    This is safe because we are currently on 'new_history_branch'.
+          git branch -D "$TARGET_BRANCH"
+
+          # 5. Rename the 'new_history_branch' to be the original target branch name.
+          git branch -m "$TARGET_BRANCH"
+
+          # 6. Force push the new branch history to the remote.
+          #    This is the step that overwrites the history on GitHub.
+          echo "Force pushing '$TARGET_BRANCH' to origin..."
+          git push -f origin "$TARGET_BRANCH"
+
+          echo "✅ History for branch '$TARGET_BRANCH' has been squashed to a single commit."
+          echo "New HEAD is $(git rev-parse HEAD)"
+
+      - name: Verify (Optional - Check commit history count)
+        env:
+          TARGET_BRANCH: ${{ github.event.inputs.branch_to_squash }}
+        run: |
+          # Checkout again to ensure we get the fresh state from remote
+          git fetch origin "$TARGET_BRANCH"
+          git checkout "$TARGET_BRANCH"
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          echo "Number of commits on $TARGET_BRANCH: $COMMIT_COUNT"
+          if [ "$COMMIT_COUNT" -ne 1 ]; then
+            echo "Error: Expected 1 commit after squash, but found $COMMIT_COUNT."
+            exit 1
+          fi
+          echo "Verification successful: Branch has 1 commit."
